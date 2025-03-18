@@ -5,12 +5,73 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync/atomic"
 )
 
 type apiConfig struct {
 	fileServerHits atomic.Int32
+}
+
+// All helper functions
+func cleanText(input string) string {
+	// Define words to censor
+	profaneWords := []string{"kerfuffle", "sharbert", "fornax"}
+
+	// Create a regex pattern to match whole words (case insensitive)
+	for _, word := range profaneWords {
+		// Use raw string literals (backticks) to avoid needing to escape backslashes
+		pattern := `(?i)\b` + regexp.QuoteMeta(word) + `\b`
+		re := regexp.MustCompile(pattern)
+		input = re.ReplaceAllString(input, "****")
+	}
+
+	return input
+}
+
+// respondWithError sends an error response with the given status code and message
+func respondWithError(w http.ResponseWriter, code int, msg string) {
+	// Create a response that includes the error message
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+
+	respBody := errorResponse{
+		Error: msg,
+	}
+
+	// Marshal the response to JSON
+	jsonResp, err := json.Marshal(respBody)
+	if err != nil {
+		// If marshaling fails, log the error and return a basic 500 error
+		log.Printf("Error marshaling JSON: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Internal server error"))
+		return
+	}
+
+	// Set headers and write response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(jsonResp)
+}
+
+// respondWithJSON sends a success response with the given status code and payload
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	// Marshal the payload to JSON
+	jsonResp, err := json.Marshal(payload)
+	if err != nil {
+		// If marshaling fails, log the error and return a basic 500 error
+		log.Printf("Error marshaling JSON: %s", err)
+		respondWithError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+
+	// Set headers and write response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(jsonResp)
 }
 
 func main() {
@@ -74,52 +135,26 @@ func (cfg *apiConfig) validateChirpHandler(w http.ResponseWriter, r *http.Reques
 	type parameters struct {
 		Body string `json:"body"`
 	}
-	type returnVals struct {
-		Error string `json:"error"`
-	}
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
 		log.Printf("error decoding parameters: %s", err)
-		resErrBody := returnVals{
-			Error: "Something went wrong",
-		}
-		dat, err := json.Marshal(resErrBody)
-		if err != nil {
-			log.Printf("error marshaling error json: %s", err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(dat)
+		respondWithError(w, 500, "Something went wrong")
 		return
 	}
 	params.Body = strings.TrimSpace(params.Body)
 	if len(params.Body) > 140 {
 		log.Println("too many characters in body")
-		resErrBody := returnVals{
-			Error: "Chirp is too long",
-		}
-		dat, err := json.Marshal(resErrBody)
-		if err != nil {
-			log.Printf("error marshaling error json: %s", err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-		w.Write(dat)
+		respondWithError(w, 400, "Chirp is too long")
 		return
 	}
 	type successResponse struct {
-		Valid bool `json:"valid"`
+		CleanedBody string `json:"cleaned_body"`
 	}
+	cleanedString := cleanText(params.Body)
 	respBody := successResponse{
-		Valid: true,
+		CleanedBody: cleanedString,
 	}
-	dat, err := json.Marshal(respBody)
-	if err != nil {
-		log.Printf("error marshaling json: %s", err)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	w.Write(dat)
+	respondWithJSON(w, 200, respBody)
 }
