@@ -1,23 +1,19 @@
 package main
 
 import (
-	"fmt"
+	// "fmt"
+	"log"
 	"net/http"
 )
 
-type Server struct {
-	Addr    string
-	Handler http.ServeMux
-}
-
 func main() {
 	serveMux := http.NewServeMux()
-	newServer := Server{
+	server := http.Server{
 		Addr:    ":8080",
-		Handler: *serveMux,
+		Handler: serveMux,
 	}
-	err := http.ListenAndServe(newServer.Addr, &newServer.Handler)
+	err := server.ListenAndServe()
 	if err != nil {
-		fmt.Errorf("error listening and serving: %w", err)
+		log.Fatalf("error listening and serving: %v", err)
 	}
 }
