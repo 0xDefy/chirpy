@@ -19,9 +19,9 @@ func main() {
 			http.StripPrefix(
 				"/app/", http.FileServer(
 					http.Dir(".")))))
-	serveMux.HandleFunc("GET /healthz", healthzHandle)
-	serveMux.HandleFunc("GET /metrics", apiCfg.metricsHandler)
-	serveMux.HandleFunc("POST /reset", apiCfg.resetMetricsHandler)
+	serveMux.HandleFunc("GET /api/healthz", healthzHandle)
+	serveMux.HandleFunc("GET /api/metrics", apiCfg.metricsHandler)
+	serveMux.HandleFunc("POST /api/reset", apiCfg.resetMetricsHandler)
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: serveMux,
