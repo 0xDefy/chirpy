@@ -116,6 +116,8 @@ func main() {
 	serveMux.HandleFunc("POST /api/users", apiCfg.createUserHandler)
 	serveMux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
 	serveMux.HandleFunc("POST /api/chirps", apiCfg.chirpsHandler)
+	serveMux.HandleFunc("GET /api/chirps", apiCfg.getChirpsHandler)
+	serveMux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirpsByIdHandler)
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: serveMux,
@@ -244,4 +246,66 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 		Email:     dbUser.Email,
 	}
 	respondWithJSON(w, 201, user)
+}
+
+func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	dbChirps, err := cfg.DB.GetChirps(r.Context())
+	if err != nil {
+		log.Printf("error fetching chirps %s", err)
+		respondWithError(w, 500, "fetching from database failed")
+		return
+	}
+	type chirp struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Body      string    `json:"body"`
+		UserID    uuid.UUID `json:"user_id"`
+	}
+	chirpArr := []chirp{}
+	for _, dbChirp := range dbChirps {
+		newChirp := chirp{
+			ID:        dbChirp.ID,
+			CreatedAt: dbChirp.CreatedAt,
+			UpdatedAt: dbChirp.UpdatedAt,
+			Body:      dbChirp.Body,
+			UserID:    dbChirp.UserID,
+		}
+		chirpArr = append(chirpArr, newChirp)
+	}
+	respondWithJSON(w, 200, chirpArr)
+}
+
+func (cfg *apiConfig) getChirpsByIdHandler(w http.ResponseWriter, r *http.Request) {
+	chirpIDStr := r.PathValue("chirpID")
+
+	// Convert string to UUID
+	chirpID, err := uuid.Parse(chirpIDStr)
+	if err != nil {
+		// Handle invalid UUID
+		http.Error(w, "Invalid chirp ID", http.StatusBadRequest)
+		return
+	}
+
+	dbChirp, err := cfg.DB.GetChirpsById(r.Context(), chirpID)
+	if err != nil {
+		log.Printf("error fetching user by id %v", err)
+		respondWithError(w, 404, "chirp not found")
+		return
+	}
+	type chirp struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Body      string    `json:"body"`
+		UserID    uuid.UUID `json:"user_id"`
+	}
+	newChirp := chirp{
+		ID:        dbChirp.ID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+		Body:      dbChirp.Body,
+		UserID:    dbChirp.UserID,
+	}
+	respondWithJSON(w, 200, newChirp)
 }
