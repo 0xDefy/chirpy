@@ -126,6 +126,8 @@ func main() {
 	serveMux.HandleFunc("GET /api/chirps", apiCfg.getChirpsHandler)
 	serveMux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirpsByIdHandler)
 	serveMux.HandleFunc("POST /api/login", apiCfg.loginHandler)
+	serveMux.HandleFunc("POST /api/refresh", apiCfg.refreshHandler)
+	serveMux.HandleFunc("POST /api/revoke", apiCfg.revokeHandler)
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: serveMux,
@@ -342,9 +344,8 @@ func (cfg *apiConfig) getChirpsByIdHandler(w http.ResponseWriter, r *http.Reques
 
 func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email              string `json:"email"`
-		Password           string `json:"password"`
-		Expires_in_seconds *int   `json:"expires_in_seconds,omitempty"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
@@ -353,16 +354,6 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("error decoding parameters: %s", err)
 		respondWithError(w, 400, "Something went wrong")
 		return
-	}
-	var expiresIn int
-	if params.Expires_in_seconds != nil {
-		expiresIn = *params.Expires_in_seconds
-	} else {
-		expiresIn = 3600
-	}
-	// cap at 1hr
-	if expiresIn > 3600 {
-		expiresIn = 3600
 	}
 	params.Email = strings.TrimSpace(params.Email)
 	dbUser, err := cfg.DB.GetUserByEmail(r.Context(), params.Email)
@@ -378,24 +369,91 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type UserWithToken struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
-		Token     string    `json:"token"`
+		ID           uuid.UUID `json:"id"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		Email        string    `json:"email"`
+		Token        string    `json:"token"`
+		RefreshToken string    `json:"refresh_token"`
 	}
-	jwtToken, err := auth.MakeJWT(dbUser.ID, cfg.JWTSecret, time.Duration(expiresIn)*time.Second)
+	jwtToken, err := auth.MakeJWT(dbUser.ID, cfg.JWTSecret)
 	if err != nil {
 		log.Printf("error making JWT: %s", err)
 		respondWithError(w, 500, "error making jwt")
 		return
 	}
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		log.Printf("error making refreshing token: %s", err)
+		respondWithError(w, 500, "error making refresh token")
+		return
+	}
+	// upload refresh token
+	refreshTokenParams := database.CreateRefreshTokenParams{
+		Token:  refreshToken,
+		UserID: dbUser.ID,
+	}
+	_, err = cfg.DB.CreateRefreshToken(r.Context(), refreshTokenParams)
+	if err != nil {
+		log.Printf("error uploading refresh token: %s", err)
+		respondWithError(w, 500, "error uploading refresh token")
+		return
+	}
 	userWithoutPassword := UserWithToken{
-		ID:        dbUser.ID,
-		CreatedAt: dbUser.CreatedAt,
-		UpdatedAt: dbUser.UpdatedAt,
-		Email:     dbUser.Email,
-		Token:     jwtToken,
+		ID:           dbUser.ID,
+		CreatedAt:    dbUser.CreatedAt,
+		UpdatedAt:    dbUser.UpdatedAt,
+		Email:        dbUser.Email,
+		Token:        jwtToken,
+		RefreshToken: refreshToken,
 	}
 	respondWithJSON(w, 200, userWithoutPassword)
+}
+
+func (cfg *apiConfig) refreshHandler(w http.ResponseWriter, r *http.Request) {
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("error getting bearer token %s", err)
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+	dbToken, err := cfg.DB.GetRefreshToken(r.Context(), tokenString)
+	if err != nil {
+		log.Printf("error fetching token details: %s", err)
+		respondWithError(w, 401, "token not found")
+		return
+	}
+	if time.Now().After(dbToken.ExpiresAt) {
+		respondWithError(w, 401, "Refresh Token Expired")
+		return
+	}
+	if dbToken.RevokedAt.Valid {
+		respondWithError(w, 401, "Refresh Token Revoked")
+		return
+	}
+	jwtToken, err := auth.MakeJWT(dbToken.UserID, cfg.JWTSecret)
+	if err != nil {
+		log.Printf("error making jwt: %s", err)
+		respondWithError(w, 500, "Internal server error")
+		return
+	}
+	respondWithJSON(w, 200, map[string]string{
+		"token": jwtToken,
+	})
+}
+
+func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("error getting bearer token %s", err)
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+	err = cfg.DB.RevokeRefreshToken(r.Context(), tokenString)
+	if err != nil {
+		log.Printf("error revoking token: %s", err)
+		respondWithError(w, 401, "refresh token not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
