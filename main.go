@@ -24,6 +24,7 @@ type apiConfig struct {
 	fileServerHits atomic.Int32
 	DB             *database.Queries
 	PLATFORM       string
+	JWTSecret      string
 }
 
 type User struct {
@@ -97,14 +98,19 @@ func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET environment variable is required")
+	}
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatalf("error connecting to database: %v", err)
 	}
 	dbQueries := database.New(db)
 	apiCfg := apiConfig{
-		DB:       dbQueries,
-		PLATFORM: platform,
+		DB:        dbQueries,
+		PLATFORM:  platform,
+		JWTSecret: jwtSecret,
 	}
 	serveMux := http.NewServeMux()
 	serveMux.Handle("/app/",
@@ -176,12 +182,23 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Body   string    `json:"body"`
-		UserId uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
+	}
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("error getting bearer token %s", err)
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+	user_id, err := auth.ValidateJWT(tokenString, cfg.JWTSecret)
+	if err != nil {
+		log.Printf("jwt invalid: %s", err)
+		respondWithError(w, 401, "Unauthorized")
+		return
 	}
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	if err != nil {
 		log.Printf("error decoding parameters: %s", err)
 		respondWithError(w, 500, "Something went wrong")
@@ -195,7 +212,7 @@ func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	dbParams := database.CreateChirpParams{
 		Body:   params.Body,
-		UserID: params.UserId,
+		UserID: user_id,
 	}
 	dbChirps, err := cfg.DB.CreateChirp(r.Context(), dbParams)
 	if err != nil {
@@ -325,8 +342,9 @@ func (cfg *apiConfig) getChirpsByIdHandler(w http.ResponseWriter, r *http.Reques
 
 func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email              string `json:"email"`
+		Password           string `json:"password"`
+		Expires_in_seconds *int   `json:"expires_in_seconds,omitempty"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
@@ -336,6 +354,16 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 400, "Something went wrong")
 		return
 	}
+	var expiresIn int
+	if params.Expires_in_seconds != nil {
+		expiresIn = *params.Expires_in_seconds
+	} else {
+		expiresIn = 3600
+	}
+	// cap at 1hr
+	if expiresIn > 3600 {
+		expiresIn = 3600
+	}
 	params.Email = strings.TrimSpace(params.Email)
 	dbUser, err := cfg.DB.GetUserByEmail(r.Context(), params.Email)
 	if err != nil {
@@ -343,17 +371,31 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 401, "Incorrect email or password")
 		return
 	}
-	userWithoutPassword := User{
-		ID:        dbUser.ID,
-		CreatedAt: dbUser.CreatedAt,
-		UpdatedAt: dbUser.UpdatedAt,
-		Email:     dbUser.Email,
-	}
 	err = auth.CheckPasswordHash(params.Password, dbUser.HashedPassword)
 	if err != nil {
 		log.Printf("user password not matching: %s", err)
 		respondWithError(w, 401, "Incorrect email or password")
 		return
+	}
+	type UserWithToken struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+		Token     string    `json:"token"`
+	}
+	jwtToken, err := auth.MakeJWT(dbUser.ID, cfg.JWTSecret, time.Duration(expiresIn)*time.Second)
+	if err != nil {
+		log.Printf("error making JWT: %s", err)
+		respondWithError(w, 500, "error making jwt")
+		return
+	}
+	userWithoutPassword := UserWithToken{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+		Token:     jwtToken,
 	}
 	respondWithJSON(w, 200, userWithoutPassword)
 }
