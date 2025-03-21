@@ -128,6 +128,8 @@ func main() {
 	serveMux.HandleFunc("POST /api/login", apiCfg.loginHandler)
 	serveMux.HandleFunc("POST /api/refresh", apiCfg.refreshHandler)
 	serveMux.HandleFunc("POST /api/revoke", apiCfg.revokeHandler)
+	serveMux.HandleFunc("PUT /api/users", apiCfg.putUserHandler)
+	serveMux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirpsByIdHandler)
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: serveMux,
@@ -453,6 +455,112 @@ func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("error revoking token: %s", err)
 		respondWithError(w, 401, "refresh token not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (cfg *apiConfig) putUserHandler(w http.ResponseWriter, r *http.Request) {
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("error getting bearer token %s", err)
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+
+	userID, err := auth.ValidateJWT(tokenString, cfg.JWTSecret)
+	if err != nil {
+		log.Printf("error validating: %s", err)
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+	type parameters struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		log.Printf("error decoding parameters: %s", err)
+		respondWithError(w, 400, "Something went wrong")
+		return
+	}
+	params.Email = strings.TrimSpace(params.Email)
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		log.Printf("error hashing password: %s", err)
+		respondWithError(w, 500, "internal server error")
+		return
+	}
+	upParams := database.UpdateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+		ID:             userID,
+	}
+	updatedUser, err := cfg.DB.UpdateUser(r.Context(), upParams)
+	if err != nil {
+		log.Printf("error updating user: %s", err)
+		respondWithError(w, 500, "error updating user: %s")
+		return
+	}
+	type userResponse struct {
+		ID        string    `json:"id"`
+		Email     string    `json:"email"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+
+	// Then before responding:
+	response := userResponse{
+		ID:        updatedUser.ID.String(),
+		Email:     updatedUser.Email,
+		CreatedAt: updatedUser.CreatedAt,
+		UpdatedAt: updatedUser.UpdatedAt,
+	}
+
+	respondWithJSON(w, 200, response)
+}
+
+func (cfg *apiConfig) deleteChirpsByIdHandler(w http.ResponseWriter, r *http.Request) {
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("error getting bearer token %s", err)
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+
+	userID, err := auth.ValidateJWT(tokenString, cfg.JWTSecret)
+	if err != nil {
+		log.Printf("error validating: %s", err)
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+	chirpIDStr := r.PathValue("chirpID")
+
+	// Convert string to UUID
+	chirpID, err := uuid.Parse(chirpIDStr)
+	if err != nil {
+		// Handle invalid UUID
+		http.Error(w, "Invalid chirp ID", http.StatusBadRequest)
+		return
+	}
+
+	dbChirp, err := cfg.DB.GetChirpsById(r.Context(), chirpID)
+	if err != nil {
+		log.Printf("error fetching user by id %v", err)
+		respondWithError(w, 404, "chirp not found")
+		return
+	}
+	if userID != dbChirp.UserID {
+		log.Printf("userid and chirp userid do not match %v", err)
+		respondWithError(w, 403, "userid mismatch")
+		return
+	}
+	err = cfg.DB.DeleteChirpsById(r.Context(), dbChirp.ID)
+	if err != nil {
+		log.Printf("error deleting chirp %v", err)
+		respondWithError(w, 404, "chirp not found")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
