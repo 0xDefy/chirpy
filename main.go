@@ -25,13 +25,15 @@ type apiConfig struct {
 	DB             *database.Queries
 	PLATFORM       string
 	JWTSecret      string
+	PolkaKEY       string
 }
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID          uuid.UUID `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 // All helper functions
@@ -99,6 +101,7 @@ func main() {
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
 	jwtSecret := os.Getenv("JWT_SECRET")
+	polkaKey := os.Getenv("POLKA_KEY")
 	if jwtSecret == "" {
 		log.Fatal("JWT_SECRET environment variable is required")
 	}
@@ -111,6 +114,7 @@ func main() {
 		DB:        dbQueries,
 		PLATFORM:  platform,
 		JWTSecret: jwtSecret,
+		PolkaKEY:  polkaKey,
 	}
 	serveMux := http.NewServeMux()
 	serveMux.Handle("/app/",
@@ -130,6 +134,7 @@ func main() {
 	serveMux.HandleFunc("POST /api/revoke", apiCfg.revokeHandler)
 	serveMux.HandleFunc("PUT /api/users", apiCfg.putUserHandler)
 	serveMux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirpsByIdHandler)
+	serveMux.HandleFunc("POST /api/polka/webhooks", apiCfg.upgradeUserByIdHandler)
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: serveMux,
@@ -274,10 +279,11 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	user := User{
-		ID:        dbUser.ID,
-		CreatedAt: dbUser.CreatedAt,
-		UpdatedAt: dbUser.UpdatedAt,
-		Email:     dbUser.Email,
+		ID:          dbUser.ID,
+		CreatedAt:   dbUser.CreatedAt,
+		UpdatedAt:   dbUser.UpdatedAt,
+		Email:       dbUser.Email,
+		IsChirpyRed: dbUser.IsChirpyRed,
 	}
 	respondWithJSON(w, 201, user)
 }
@@ -377,6 +383,7 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		Email        string    `json:"email"`
 		Token        string    `json:"token"`
 		RefreshToken string    `json:"refresh_token"`
+		IsChirpyRed  bool      `json:"is_chirpy_red"`
 	}
 	jwtToken, err := auth.MakeJWT(dbUser.ID, cfg.JWTSecret)
 	if err != nil {
@@ -408,6 +415,7 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		Email:        dbUser.Email,
 		Token:        jwtToken,
 		RefreshToken: refreshToken,
+		IsChirpyRed:  dbUser.IsChirpyRed,
 	}
 	respondWithJSON(w, 200, userWithoutPassword)
 }
@@ -505,18 +513,20 @@ func (cfg *apiConfig) putUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type userResponse struct {
-		ID        string    `json:"id"`
-		Email     string    `json:"email"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
+		ID          string    `json:"id"`
+		Email       string    `json:"email"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		IsChirpyRed bool      `json:"is_chirpy_red"`
 	}
 
 	// Then before responding:
 	response := userResponse{
-		ID:        updatedUser.ID.String(),
-		Email:     updatedUser.Email,
-		CreatedAt: updatedUser.CreatedAt,
-		UpdatedAt: updatedUser.UpdatedAt,
+		ID:          updatedUser.ID.String(),
+		Email:       updatedUser.Email,
+		CreatedAt:   updatedUser.CreatedAt,
+		UpdatedAt:   updatedUser.UpdatedAt,
+		IsChirpyRed: updatedUser.IsChirpyRed,
 	}
 
 	respondWithJSON(w, 200, response)
@@ -561,6 +571,55 @@ func (cfg *apiConfig) deleteChirpsByIdHandler(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		log.Printf("error deleting chirp %v", err)
 		respondWithError(w, 404, "chirp not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (cfg *apiConfig) upgradeUserByIdHandler(w http.ResponseWriter, r *http.Request) {
+	tokenString, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		log.Printf("error getting API key: %s", err)
+		respondWithError(w, 401, "error getting APIkey")
+		return
+	}
+	if tokenString != cfg.PolkaKEY {
+		log.Printf("error while matching polka key")
+		respondWithError(w, 401, "Api key do not match")
+		return
+	}
+	type data struct {
+		UserID string `json:"user_id"`
+	}
+
+	type parameters struct {
+		Event string `json:"event"`
+		Data  data   `json:"data"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		log.Printf("error decoding parameters: %s", err)
+		respondWithError(w, 400, "Something went wrong")
+		return
+	}
+	if params.Event != "user.upgraded" {
+		log.Printf("not an event about user upgrade")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	userId, err := uuid.Parse(params.Data.UserID)
+	if err != nil {
+		log.Printf("error parsing user id: %s", err)
+		respondWithError(w, 400, "internal server error")
+		return
+	}
+	_, err = cfg.DB.UpgradeUser(r.Context(), userId)
+	if err != nil {
+		log.Printf("error upgrading user %s", err)
+		respondWithError(w, 404, "User not found")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
