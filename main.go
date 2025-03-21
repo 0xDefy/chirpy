@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -289,6 +290,49 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	s := r.URL.Query().Get("author_id")
+	sortS := r.URL.Query().Get("sort")
+	if s != "" {
+		userID, err := uuid.Parse(s)
+		if err != nil {
+			log.Printf("error parsing author_id: %s", err)
+			respondWithError(w, 500, "error parsing author_id")
+			return
+		}
+		dbChirps, err := cfg.DB.GetChirpsByUserId(r.Context(), userID)
+		if err != nil {
+			log.Printf("error fetching chirps %s", err)
+			respondWithError(w, 500, "fetching from database failed")
+			return
+		}
+		type chirp struct {
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Body      string    `json:"body"`
+			UserID    uuid.UUID `json:"user_id"`
+		}
+		chirpArr := []chirp{}
+		for _, dbChirp := range dbChirps {
+			newChirp := chirp{
+				ID:        dbChirp.ID,
+				CreatedAt: dbChirp.CreatedAt,
+				UpdatedAt: dbChirp.UpdatedAt,
+				Body:      dbChirp.Body,
+				UserID:    dbChirp.UserID,
+			}
+			chirpArr = append(chirpArr, newChirp)
+		}
+		if sortS == "" || sortS == "asc" {
+			respondWithJSON(w, 200, chirpArr)
+		} else {
+			sort.Slice(chirpArr, func(i, j int) bool {
+				return chirpArr[i].CreatedAt.After(chirpArr[j].CreatedAt)
+			})
+			respondWithJSON(w, 200, chirpArr)
+		}
+		return
+	}
 	dbChirps, err := cfg.DB.GetChirps(r.Context())
 	if err != nil {
 		log.Printf("error fetching chirps %s", err)
@@ -313,7 +357,14 @@ func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		chirpArr = append(chirpArr, newChirp)
 	}
-	respondWithJSON(w, 200, chirpArr)
+	if sortS == "" || sortS == "asc" {
+		respondWithJSON(w, 200, chirpArr)
+	} else {
+		sort.Slice(chirpArr, func(i, j int) bool {
+			return chirpArr[i].CreatedAt.After(chirpArr[j].CreatedAt)
+		})
+		respondWithJSON(w, 200, chirpArr)
+	}
 }
 
 func (cfg *apiConfig) getChirpsByIdHandler(w http.ResponseWriter, r *http.Request) {
